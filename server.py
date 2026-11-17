@@ -1,8 +1,29 @@
+from PIL import Image
+from io import BytesIO
+import base64
+import uuid
 from flask import Flask, request, jsonify, render_template_string
 import os
 import requests
+import time
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+os.makedirs("static/generated", exist_ok=True)
+
+
+def post_with_retry(url, **kwargs):
+    for attempt in range(3):
+        response = requests.post(url, **kwargs)
+
+        if response.status_code not in (429, 500, 502, 503, 504):
+            return response
+
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+
+    return response
+
 
 HTML = """
 <!DOCTYPE html>
@@ -43,6 +64,15 @@ button{
  padding:12px 20px;font-weight:bold;
 }
 button:disabled{opacity:.5}
+
+#imageEditor{margin-top:22px;padding:16px;background:#192235;border-radius:15px}
+#imageEditor h2{color:#43d9ff}
+#imageEditor input[type=file]{width:100%;padding:12px;background:#101522;border-radius:10px;color:white}
+#imageEditor textarea{width:100%;margin-top:12px;min-height:85px}
+#imagePreview{display:none;max-width:100%;max-height:350px;margin:15px auto;border-radius:12px}
+#editedImage{display:none;max-width:100%;margin:15px auto;border-radius:12px}
+#editStatus{white-space:pre-wrap;margin-top:12px}
+
 </style>
 </head>
 <body>
@@ -59,6 +89,20 @@ button:disabled{opacity:.5}
 placeholder="এখানে লিখুন..." required></textarea>
 <button id="send" type="submit">Send</button>
 </form>
+
+<section id="imageEditor">
+<h2>🎨 AI Image Editor</h2>
+<p>ছবি নির্বাচন করুন এবং কী পরিবর্তন চান লিখুন।</p>
+<form id="imageForm">
+<input id="imageFile" type="file" accept="image/jpeg,image/png,image/webp" required>
+<img id="imagePreview" alt="নির্বাচিত ছবি">
+<textarea id="imagePrompt" placeholder="যেমন: ছবির ব্যাকগ্রাউন্ড সুন্দর করে দাও..." required></textarea>
+<button id="editButton" type="submit">ছবি এডিট করুন</button>
+</form>
+<div id="editStatus"></div>
+<img id="editedImage" alt="এডিট করা ছবি">
+</section>
+
 </div>
 <script>
 const chat=document.getElementById('chat');
@@ -110,6 +154,77 @@ form.addEventListener('submit',async e=>{
   input.focus();
  }
 });
+
+const imageForm=document.getElementById('imageForm');
+const imageFile=document.getElementById('imageFile');
+const imagePrompt=document.getElementById('imagePrompt');
+const imagePreview=document.getElementById('imagePreview');
+const editedImage=document.getElementById('editedImage');
+const editButton=document.getElementById('editButton');
+const editStatus=document.getElementById('editStatus');
+
+imageFile.addEventListener('change',()=>{
+ const file=imageFile.files[0];
+ if(!file)return;
+ imagePreview.src=URL.createObjectURL(file);
+ imagePreview.style.display='block';
+ editedImage.style.display='none';
+ editStatus.textContent='';
+});
+
+imageForm.addEventListener('submit',async e=>{
+ e.preventDefault();
+ const file=imageFile.files[0];
+ const prompt=imagePrompt.value.trim();
+ if(!file||!prompt)return;
+
+ const body=new FormData();
+ body.append('image',file);
+ body.append('prompt',prompt);
+ editButton.disabled=true;
+ editStatus.textContent='AI ছবি এডিট করছে... অপেক্ষা করুন।';
+ editedImage.style.display='none';
+
+ try{
+  const response=await fetch('/edit-image',{method:'POST',body});
+  const data=await response.json();
+  if(!response.ok)throw new Error(data.error||'ছবি এডিট করা যায়নি');
+
+  const imageUrl=data.image_url;
+  editedImage.src=imageUrl;
+  editedImage.style.display='block';
+  editStatus.textContent='ছবি এডিট সম্পন্ন হয়েছে!';
+
+  const save=confirm('এডিট করা ছবিটি আপনার ফোনে সেভ বা শেয়ার করতে চান?');
+  if(save){
+   const imageResponse=await fetch(imageUrl);
+   const blob=await imageResponse.blob();
+   const editedFile=new File([blob],'SK-Advanced-AI-Edited.png',{type:blob.type||'image/png'});
+
+   if(navigator.share && navigator.canShare && navigator.canShare({files:[editedFile]})){
+    await navigator.share({files:[editedFile],title:'SK Advanced AI Edited Image'});
+   }else{
+    const link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);
+    link.download='SK-Advanced-AI-Edited.png';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(()=>URL.revokeObjectURL(link.href),60000);
+    editStatus.textContent='ছবি ডাউনলোড শুরু হয়েছে। ফোনের Gallery/Photos-এ সেভ করুন।';
+   }
+  }
+ }catch(error){
+  if(error.name==='AbortError'){
+   editStatus.textContent='শেয়ার বাতিল হয়েছে। এডিট করা ছবি ওয়েবসাইটে আছে।';
+  }else{
+   editStatus.textContent='সমস্যা: '+error.message;
+  }
+ }finally{
+  editButton.disabled=false;
+ }
+});
+
 </script>
 </body>
 </html>
@@ -152,7 +267,7 @@ def chat():
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-2.5-flash:generateContent"
+        "models/gemini-flash-lite-latest:generateContent"
     )
 
     try:
@@ -200,6 +315,101 @@ def chat():
 
     except requests.RequestException:
         return jsonify({"error": "Gemini সার্ভারের সঙ্গে সংযোগ হয়নি"}), 502
+
+
+
+@app.route("/edit-image", methods=["POST"])
+def edit_image():
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "Gemini API Key সেট করা হয়নি"}), 503
+
+    uploaded = request.files.get("image")
+    prompt = str(request.form.get("prompt", "")).strip()
+
+    if not uploaded:
+        return jsonify({"error": "একটি ছবি নির্বাচন করুন"}), 400
+    if not prompt:
+        return jsonify({"error": "ছবি কীভাবে এডিট করতে চান লিখুন"}), 400
+    if len(prompt) > 2000:
+        return jsonify({"error": "এডিট নির্দেশনা ২০০০ অক্ষরের মধ্যে রাখুন"}), 400
+
+    mime = uploaded.mimetype
+    if mime not in ("image/jpeg", "image/png", "image/webp"):
+        return jsonify({"error": "শুধু JPG, PNG অথবা WEBP ছবি দিন"}), 400
+
+    try:
+        raw = uploaded.read()
+        if not raw:
+            return jsonify({"error": "ছবিটি খালি"}), 400
+
+        with Image.open(BytesIO(raw)) as img:
+            if img.width * img.height > 25000000:
+                return jsonify({"error": "ছবির আকার ২৫ মেগাপিক্সেলের বেশি"}), 400
+            img.verify()
+
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            "models/gemini-3.1-flash-image:generateContent"
+        )
+
+        response = post_with_retry(
+            url,
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json"
+            },
+            json={
+                "contents": [{
+                    "parts": [
+                        {"text": "Edit this image according to the user's "
+                                 "instructions. Preserve the main subject "
+                                 "unless asked otherwise. Instructions: " + prompt},
+                        {"inlineData": {
+                            "mimeType": mime,
+                            "data": base64.b64encode(raw).decode("utf-8")
+                        }}
+                    ]
+                }],
+                "generationConfig": {
+                    "responseModalities": ["TEXT", "IMAGE"]
+                }
+            },
+            timeout=180
+        )
+
+        result = response.json()
+        if response.status_code != 200:
+            message = result.get("error", {}).get("message", "Image API Error")
+            return jsonify({"error": message}), 502
+
+        parts = (
+            result.get("candidates", [{}])[0]
+            .get("content", {}).get("parts", [])
+        )
+
+        for part in parts:
+            data = part.get("inlineData") or part.get("inline_data")
+            if data and data.get("data"):
+                output = base64.b64decode(data["data"])
+                output_mime = data.get("mimeType") or data.get("mime_type", "image/png")
+                ext = {"image/jpeg": "jpg", "image/webp": "webp"}.get(
+                    output_mime, "png"
+                )
+                filename = str(uuid.uuid4()) + "." + ext
+                Path("static/generated").mkdir(parents=True, exist_ok=True)
+                Path("static/generated", filename).write_bytes(output)
+
+                return jsonify({
+                    "reply": "ছবি এডিট সম্পন্ন হয়েছে",
+                    "image_url": "/static/generated/" + filename
+                })
+
+        return jsonify({"error": "AI কোনো এডিট করা ছবি ফেরত দেয়নি"}), 502
+
+    except Exception:
+        app.logger.exception("Image editing failed")
+        return jsonify({"error": "ছবি এডিট করা যায়নি। ছবিটি ও নির্দেশনা পরীক্ষা করুন।"}), 500
 
 
 if __name__ == "__main__":
