@@ -205,10 +205,77 @@ function saveData(){
  sessionStorage.setItem('skastra_chats',JSON.stringify(conversations));
 }
 
+function appendInlineMarkdown(parent, source){
+ const pattern=/(\\\\*\\\\*[^*\\\\n]+\\\\*\\\\*|`[^`\\\\n]+`|\\\\*[^*\\\\n]+\\\\*|\\\\[[^\\\\]]+\\\\]\\\\(https?:\\\\/\\\\/[^)\\\\s]+\\\\))/g;
+ let last=0, match;
+ while((match=pattern.exec(source))!==null){
+  parent.appendChild(document.createTextNode(source.slice(last,match.index)));
+  const token=match[0];
+  let el=null;
+  if(token.startsWith('**')){
+   el=document.createElement('strong');
+   el.textContent=token.slice(2,-2);
+  }else if(token.startsWith('`')){
+   el=document.createElement('code');
+   el.textContent=token.slice(1,-1);
+  }else if(token.startsWith('*')){
+   el=document.createElement('em');
+   el.textContent=token.slice(1,-1);
+  }else{
+   const split=token.lastIndexOf('](');
+   const label=token.slice(1,split);
+   const href=token.slice(split+2,-1);
+   try{
+    const url=new URL(href);
+    if(url.protocol==='https:'||url.protocol==='http:'){
+     el=document.createElement('a');
+     el.textContent=label;
+     el.href=url.href;
+     el.target='_blank';
+     el.rel='noopener noreferrer';
+    }
+   }catch(e){}
+  }
+  if(el)parent.appendChild(el);
+  else parent.appendChild(document.createTextNode(token));
+  last=pattern.lastIndex;
+ }
+ parent.appendChild(document.createTextNode(source.slice(last)));
+}
+
+function renderMarkdown(div, source){
+ const lines=String(source).split('\\n');
+ let list=null;
+ lines.forEach((line,index)=>{
+  const item=line.match(/^\\s*[-*]\\s+(.+)$/);
+  const heading=line.match(/^(#{1,3})\\s+(.+)$/);
+  if(item){
+   if(!list){
+    list=document.createElement('ul');
+    div.appendChild(list);
+   }
+   const li=document.createElement('li');
+   appendInlineMarkdown(li,item[1]);
+   list.appendChild(li);
+  }else{
+   list=null;
+   if(heading){
+    const h=document.createElement('h'+Math.min(heading[1].length+1,4));
+    appendInlineMarkdown(h,heading[2]);
+    div.appendChild(h);
+   }else{
+    appendInlineMarkdown(div,line);
+   }
+   if(index<lines.length-1)div.appendChild(document.createElement('br'));
+  }
+ });
+}
+
 function addMessage(text,role){
  const div=document.createElement('div');
  div.className='msg '+role;
- div.textContent=text;
+ if(role==='ai')renderMarkdown(div,text);
+ else div.textContent=text;
  chat.appendChild(div);
  chat.scrollTop=chat.scrollHeight;
 }
