@@ -241,6 +241,7 @@ function loadTheme(){
 
 
 let liveVoiceMode=false;
+let liveVoiceReply=false;
 let liveRecognition=null;
 let liveBusy=false;
 let liveRestartTimer=null;
@@ -334,6 +335,7 @@ function startVoice(){
   input.value=transcript;
 
   if(liveVoiceMode){
+   liveVoiceReply=true;
    liveBusy=true;
    form.requestSubmit();
   }
@@ -379,6 +381,13 @@ form.addEventListener('submit',async e=>{
  const message=input.value.trim();
  if(!message)return;
 
+ const shouldSpeak=liveVoiceReply;
+ liveVoiceReply=false;
+ if(liveVoiceMode && !shouldSpeak){
+  liveBusy=true;
+  if(liveRecognition){try{liveRecognition.stop();}catch(e){}}
+ }
+
  messages.push({role:'user',content:message});
  addMessage(message,'user');
  input.value='';
@@ -397,7 +406,12 @@ form.addEventListener('submit',async e=>{
   messages.push({role:'assistant',content:data.reply});
   addMessage(data.reply,'ai');
   saveCurrent();
-  speak(data.reply);
+  if(shouldSpeak && liveVoiceMode){
+   speak(data.reply);
+  }else if(liveVoiceMode){
+   liveBusy=false;
+   restartLiveVoice();
+  }
  }catch(err){
   addMessage('সমস্যা: '+err.message,'ai');
   if(liveVoiceMode){
