@@ -149,6 +149,33 @@ textarea{flex:1;resize:vertical;border:1px solid var(--border);
 }
 
 
+
+.table-wrap{
+ max-width:100%;
+ overflow-x:auto;
+ margin:10px 0;
+ border-radius:8px;
+}
+.table-wrap table{
+ border-collapse:collapse;
+ width:100%;
+ min-width:520px;
+ font-size:13px;
+}
+.table-wrap th,.table-wrap td{
+ border:1px solid var(--border);
+ padding:8px;
+ text-align:left;
+ vertical-align:top;
+}
+.table-wrap th{
+ background:var(--panel);
+ color:var(--text);
+}
+.table-wrap td{
+ background:var(--chat);
+}
+
 </style>
 </head>
 <body>
@@ -246,9 +273,69 @@ function appendInlineMarkdown(parent, source){
 function renderMarkdown(div, source){
  const lines=String(source).split('\\n');
  let list=null;
- lines.forEach((line,index)=>{
+
+ function getCells(line){
+  return line.trim().split('|').slice(1,-1).map(cell=>cell.trim());
+ }
+
+ function isSeparator(cells){
+  return cells.length>0 && cells.every(cell=>/^:?-{3,}:?$/.test(cell.replace(/ /g,'')));
+ }
+
+ for(let i=0;i<lines.length;i++){
+  const line=lines[i];
+  const trimmed=line.trim();
+
+  if(trimmed.startsWith('|') && trimmed.endsWith('|')){
+   list=null;
+   const tableLines=[];
+
+   while(i<lines.length){
+    const current=lines[i].trim();
+    if(!current.startsWith('|') || !current.endsWith('|'))break;
+    tableLines.push(getCells(current));
+    i++;
+   }
+   i--;
+
+   if(tableLines.length){
+    const wrapper=document.createElement('div');
+    wrapper.className='table-wrap';
+    const table=document.createElement('table');
+    const thead=document.createElement('thead');
+    const tbody=document.createElement('tbody');
+    const headerRow=document.createElement('tr');
+
+    tableLines[0].forEach(cell=>{
+     const th=document.createElement('th');
+     appendInlineMarkdown(th,cell);
+     headerRow.appendChild(th);
+    });
+
+    thead.appendChild(headerRow);
+
+    tableLines.slice(1).forEach(cells=>{
+     if(isSeparator(cells))return;
+     const tr=document.createElement('tr');
+     cells.forEach(cell=>{
+      const td=document.createElement('td');
+      appendInlineMarkdown(td,cell);
+      tr.appendChild(td);
+     });
+     tbody.appendChild(tr);
+    });
+
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    wrapper.appendChild(table);
+    div.appendChild(wrapper);
+   }
+   continue;
+  }
+
   const item=line.match(/^\\s*[-*]\\s+(.+)$/);
   const heading=line.match(/^(#{1,3})\\s+(.+)$/);
+
   if(item){
    if(!list){
     list=document.createElement('ul');
@@ -266,9 +353,9 @@ function renderMarkdown(div, source){
    }else{
     appendInlineMarkdown(div,line);
    }
-   if(index<lines.length-1)div.appendChild(document.createElement('br'));
+   if(i<lines.length-1)div.appendChild(document.createElement('br'));
   }
- });
+ }
 }
 
 function addMessage(text,role){
