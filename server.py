@@ -253,18 +253,44 @@ function speak(text){
 function startVoice(){
  const SpeechRecognition=window.SpeechRecognition||
   window.webkitSpeechRecognition;
+
  if(!SpeechRecognition){
-  alert('এই ব্রাউজারে Voice Input সমর্থিত নয়। Chrome ব্যবহার করে দেখুন।');
+  alert('Voice Input-এর জন্য Chrome ব্যবহার করুন।');
   return;
  }
+
  const recognition=new SpeechRecognition();
  recognition.lang='bn-BD';
- recognition.interimResults=false;
+ recognition.interimResults=true;
+ recognition.continuous=false;
+
+ recognition.onstart=()=>{
+  const btn=document.querySelector(
+   'button[onclick="startVoice()"]'
+  );
+  btn.textContent='🎙️ শুনছি...';
+ };
+
  recognition.onresult=e=>{
-  input.value=e.results[0][0].transcript;
+  let transcript='';
+  for(let i=e.resultIndex;i<e.results.length;i++){
+   transcript+=e.results[i][0].transcript;
+  }
+  input.value=transcript;
+ };
+
+ recognition.onerror=e=>{
+  alert('Voice সমস্যা: '+e.error);
+ };
+
+ recognition.onend=()=>{
+  const btn=document.querySelector(
+   'button[onclick="startVoice()"]'
+  );
+  btn.textContent='🎤 Voice';
   input.focus();
  };
- recognition.onerror=()=>alert('মাইক্রোফোন অনুমতি ও ব্রাউজার সেটিং পরীক্ষা করুন।');
+
  recognition.start();
 }
 
