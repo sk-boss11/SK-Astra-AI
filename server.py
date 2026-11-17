@@ -104,7 +104,8 @@ textarea{flex:1;resize:vertical;border:1px solid var(--border);
 <button onclick="newChat()">＋ New Chat</button>
 <button onclick="toggleTheme()" id="themeBtn">☀️ Light Mode</button>
 <button onclick="startVoice()">🎤 Voice</button>
-<button onclick="stopSpeaking()">🔇 Stop Voice</button>
+<button onclick="stopLiveSpeech()">🔇 Stop Voice</button>
+<button onclick="toggleLiveVoice()" id="liveVoiceBtn">🔴 Live Voice চালু</button>
 </div>
 
 <div id="layout">
@@ -238,15 +239,67 @@ function loadTheme(){
  }
 }
 
+
+let liveVoiceMode=false;
+let liveRecognition=null;
+let liveBusy=false;
+let liveRestartTimer=null;
+
 function stopSpeaking(){
  if('speechSynthesis' in window)speechSynthesis.cancel();
 }
 
+function stopLiveSpeech(){
+ liveVoiceMode=false;
+ clearTimeout(liveRestartTimer);
+ if(liveRecognition){
+  try{liveRecognition.stop();}catch(e){}
+ }
+ liveRecognition=null;
+ liveBusy=false;
+ stopSpeaking();
+ updateLiveButton();
+}
+
+function updateLiveButton(){
+ const btn=document.getElementById('liveVoiceBtn');
+ if(btn)btn.textContent=liveVoiceMode?'🟢 Live Voice বন্ধ':'🔴 Live Voice চালু';
+}
+
+function restartLiveVoice(){
+ clearTimeout(liveRestartTimer);
+ if(!liveVoiceMode || liveBusy)return;
+ liveRestartTimer=setTimeout(()=>{
+  if(!liveVoiceMode || liveBusy)return;
+  try{
+   if(liveRecognition)liveRecognition.start();
+  }catch(e){}
+ },700);
+}
+
 function speak(text){
- if(!('speechSynthesis' in window))return;
+ if(!('speechSynthesis' in window)){
+  if(liveVoiceMode){
+   liveBusy=false;
+   restartLiveVoice();
+  }
+  return;
+ }
  stopSpeaking();
  const utterance=new SpeechSynthesisUtterance(text);
- utterance.lang=/[\\u0980-\\u09FF]/.test(text)?'bn-BD':'en-US';
+ utterance.lang=/[\u0980-\u09FF]/.test(text)?'bn-BD':'en-US';
+ utterance.onend=()=>{
+  if(liveVoiceMode){
+   liveBusy=false;
+   restartLiveVoice();
+  }
+ };
+ utterance.onerror=()=>{
+  if(liveVoiceMode){
+   liveBusy=false;
+   restartLiveVoice();
+  }
+ };
  speechSynthesis.speak(utterance);
 }
 
@@ -259,39 +312,66 @@ function startVoice(){
   return;
  }
 
+ if(liveRecognition){
+  try{liveRecognition.start();}catch(e){}
+  return;
+ }
+
  const recognition=new SpeechRecognition();
+ liveRecognition=recognition;
  recognition.lang='bn-BD';
- recognition.interimResults=true;
+ recognition.interimResults=false;
  recognition.continuous=false;
 
  recognition.onstart=()=>{
-  const btn=document.querySelector(
-   'button[onclick="startVoice()"]'
-  );
-  btn.textContent='🎙️ শুনছি...';
+  const btn=document.querySelector('button[onclick="startVoice()"]');
+  if(btn)btn.textContent='🎙️ শুনছি...';
  };
 
  recognition.onresult=e=>{
-  let transcript='';
-  for(let i=e.resultIndex;i<e.results.length;i++){
-   transcript+=e.results[i][0].transcript;
-  }
+  const transcript=e.results[e.results.length-1][0].transcript.trim();
+  if(!transcript)return;
   input.value=transcript;
+
+  if(liveVoiceMode){
+   liveBusy=true;
+   form.requestSubmit();
+  }
  };
 
  recognition.onerror=e=>{
-  alert('Voice সমস্যা: '+e.error);
+  if(liveVoiceMode && e.error!=='no-speech' && e.error!=='aborted'){
+   console.warn('Voice সমস্যা:',e.error);
+  }
  };
 
  recognition.onend=()=>{
-  const btn=document.querySelector(
-   'button[onclick="startVoice()"]'
-  );
-  btn.textContent='🎤 Voice';
-  input.focus();
+  const btn=document.querySelector('button[onclick="startVoice()"]');
+  if(btn)btn.textContent='🎤 Voice';
+  if(liveVoiceMode && !liveBusy)restartLiveVoice();
  };
 
- recognition.start();
+ try{recognition.start();}
+ catch(e){console.warn('Microphone চালু হয়নি:',e);}
+}
+
+function toggleLiveVoice(){
+ liveVoiceMode=!liveVoiceMode;
+ updateLiveButton();
+
+ if(liveVoiceMode){
+  liveBusy=false;
+  liveRecognition=null;
+  startVoice();
+ }else{
+  clearTimeout(liveRestartTimer);
+  if(liveRecognition){
+   try{liveRecognition.stop();}catch(e){}
+  }
+  liveRecognition=null;
+  liveBusy=false;
+  stopSpeaking();
+ }
 }
 
 form.addEventListener('submit',async e=>{
@@ -320,6 +400,10 @@ form.addEventListener('submit',async e=>{
   speak(data.reply);
  }catch(err){
   addMessage('সমস্যা: '+err.message,'ai');
+  if(liveVoiceMode){
+   liveBusy=false;
+   restartLiveVoice();
+  }
  }finally{
   send.disabled=false;
   send.textContent='Send';
