@@ -304,6 +304,15 @@ def chat():
 
         result = response.json()
 
+        if response.status_code == 429:
+            return jsonify({
+                "error": (
+                    "SK Advanced AI-এর Gemini API ব্যবহারের সীমা আপাতত শেষ "
+                    "হয়েছে। কিছুক্ষণ পরে আবার চেষ্টা করুন। প্রয়োজনে Google AI "
+                    "Studio-তে API quota ও billing পরীক্ষা করুন।"
+                )
+            }), 429
+
         if response.status_code != 200:
             error = result.get("error", {}).get(
                 "message", "Gemini API Error"
