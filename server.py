@@ -1,4 +1,3 @@
-from PIL import Image
 from io import BytesIO
 import base64
 import uuid
@@ -8,21 +7,7 @@ import requests
 import time
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 os.makedirs("static/generated", exist_ok=True)
-
-
-def post_with_retry(url, **kwargs):
-    for attempt in range(3):
-        response = requests.post(url, **kwargs)
-
-        if response.status_code not in (429, 500, 502, 503, 504):
-            return response
-
-        if attempt < 2:
-            time.sleep(2 * (attempt + 1))
-
-    return response
 
 
 HTML = """
@@ -52,7 +37,14 @@ header h1{color:#43d9ff}
 }
 .user{background:#155e75;margin-left:30px}
 .ai{background:#29364e;margin-right:30px}
-form{display:flex;gap:8px;margin-top:15px}
+#form{display:flex;gap:8px;margin-top:10px}
+#composer{margin-top:12px;padding:12px;background:#192235;border:1px solid #46536a;border-radius:16px}
+#toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#toolbar button{padding:9px 13px}
+#toolbar .active{background:#155e75;color:white}
+#toolbar select{background:#101522;color:white;border:1px solid #46536a;border-radius:9px;padding:9px;max-width:115px}
+#toolbar button:disabled{opacity:.5}
+#form textarea{min-width:0}
 textarea{
  flex:1;resize:none;padding:14px;
  border-radius:12px;border:1px solid #46536a;
@@ -65,13 +57,6 @@ button{
 }
 button:disabled{opacity:.5}
 
-#imageEditor{margin-top:22px;padding:16px;background:#192235;border-radius:15px}
-#imageEditor h2{color:#43d9ff}
-#imageEditor input[type=file]{width:100%;padding:12px;background:#101522;border-radius:10px;color:white}
-#imageEditor textarea{width:100%;margin-top:12px;min-height:85px}
-#imagePreview{display:none;max-width:100%;max-height:350px;margin:15px auto;border-radius:12px}
-#editedImage{display:none;max-width:100%;margin:15px auto;border-radius:12px}
-#editStatus{white-space:pre-wrap;margin-top:12px}
 
 </style>
 </head>
@@ -84,24 +69,27 @@ button:disabled{opacity:.5}
 <div id="chat">
 <div class="msg ai">আসসালামু আলাইকুম! আমি SK Advanced AI। কীভাবে সাহায্য করতে পারি?</div>
 </div>
+<div id="composer">
+<div id="toolbar">
+<button type="button" class="active">💬 Chat</button>
+<select id="modelSelect" aria-label="AI Model">
+<option value="auto">Auto</option>
+<option value="gemini">Gemini</option>
+</select>
+<button type="button" id="voiceButton">🎙️ Voice</button>
+<select id="voiceLanguage" aria-label="ভাষা">
+<option value="bn-BD">বাংলা</option>
+<option value="en-US">English</option>
+</select>
+<button type="button" id="speakToggle">🔊 Voice Reply: OFF</button>
+</div>
 <form id="form">
 <textarea id="message" rows="2"
 placeholder="এখানে লিখুন..." required></textarea>
 <button id="send" type="submit">Send</button>
 </form>
+</div>
 
-<section id="imageEditor">
-<h2>🎨 AI Image Editor</h2>
-<p>ছবি নির্বাচন করুন এবং কী পরিবর্তন চান লিখুন।</p>
-<form id="imageForm">
-<input id="imageFile" type="file" accept="image/jpeg,image/png,image/webp" required>
-<img id="imagePreview" alt="নির্বাচিত ছবি">
-<textarea id="imagePrompt" placeholder="যেমন: ছবির ব্যাকগ্রাউন্ড সুন্দর করে দাও..." required></textarea>
-<button id="editButton" type="submit">ছবি এডিট করুন</button>
-</form>
-<div id="editStatus"></div>
-<img id="editedImage" alt="এডিট করা ছবি">
-</section>
 
 </div>
 <script>
@@ -109,6 +97,7 @@ const chat=document.getElementById('chat');
 const form=document.getElementById('form');
 const input=document.getElementById('message');
 const send=document.getElementById('send');
+const modelSelect=document.getElementById('modelSelect');
 let history=[];
 
 function addMessage(text,type){
@@ -135,7 +124,7 @@ form.addEventListener('submit',async e=>{
   const response=await fetch('/chat',{
    method:'POST',
    headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({message,history})
+   body:JSON.stringify({message,history,model:modelSelect.value})
   });
 
   const data=await response.json();
@@ -143,6 +132,7 @@ form.addEventListener('submit',async e=>{
   if(!response.ok) throw new Error(data.error||'API Error');
 
   loading.textContent=data.reply;
+    speakReply(data.reply);
   history.push(
    {role:'user',parts:[{text:message}]},
    {role:'model',parts:[{text:data.reply}]}
@@ -155,75 +145,61 @@ form.addEventListener('submit',async e=>{
  }
 });
 
-const imageForm=document.getElementById('imageForm');
-const imageFile=document.getElementById('imageFile');
-const imagePrompt=document.getElementById('imagePrompt');
-const imagePreview=document.getElementById('imagePreview');
-const editedImage=document.getElementById('editedImage');
-const editButton=document.getElementById('editButton');
-const editStatus=document.getElementById('editStatus');
+const voiceButton=document.getElementById('voiceButton');
+const voiceLanguage=document.getElementById('voiceLanguage');
+const speakToggle=document.getElementById('speakToggle');
+let voiceReplyEnabled=false;
+let recognition=null;
+const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
 
-imageFile.addEventListener('change',()=>{
- const file=imageFile.files[0];
- if(!file)return;
- imagePreview.src=URL.createObjectURL(file);
- imagePreview.style.display='block';
- editedImage.style.display='none';
- editStatus.textContent='';
-});
-
-imageForm.addEventListener('submit',async e=>{
- e.preventDefault();
- const file=imageFile.files[0];
- const prompt=imagePrompt.value.trim();
- if(!file||!prompt)return;
-
- const body=new FormData();
- body.append('image',file);
- body.append('prompt',prompt);
- editButton.disabled=true;
- editStatus.textContent='AI ছবি এডিট করছে... অপেক্ষা করুন।';
- editedImage.style.display='none';
-
- try{
-  const response=await fetch('/edit-image',{method:'POST',body});
-  const data=await response.json();
-  if(!response.ok)throw new Error(data.error||'ছবি এডিট করা যায়নি');
-
-  const imageUrl=data.image_url;
-  editedImage.src=imageUrl;
-  editedImage.style.display='block';
-  editStatus.textContent='ছবি এডিট সম্পন্ন হয়েছে!';
-
-  const save=confirm('এডিট করা ছবিটি আপনার ফোনে সেভ বা শেয়ার করতে চান?');
-  if(save){
-   const imageResponse=await fetch(imageUrl);
-   const blob=await imageResponse.blob();
-   const editedFile=new File([blob],'SK-Advanced-AI-Edited.png',{type:blob.type||'image/png'});
-
-   if(navigator.share && navigator.canShare && navigator.canShare({files:[editedFile]})){
-    await navigator.share({files:[editedFile],title:'SK Advanced AI Edited Image'});
-   }else{
-    const link=document.createElement('a');
-    link.href=URL.createObjectURL(blob);
-    link.download='SK-Advanced-AI-Edited.png';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(()=>URL.revokeObjectURL(link.href),60000);
-    editStatus.textContent='ছবি ডাউনলোড শুরু হয়েছে। ফোনের Gallery/Photos-এ সেভ করুন।';
-   }
-  }
- }catch(error){
-  if(error.name==='AbortError'){
-   editStatus.textContent='শেয়ার বাতিল হয়েছে। এডিট করা ছবি ওয়েবসাইটে আছে।';
+if(SpeechRecognition){
+ recognition=new SpeechRecognition();
+ recognition.interimResults=false;
+ recognition.maxAlternatives=1;
+ recognition.onstart=()=>{
+  voiceButton.textContent='🛑 Stop Voice';
+  voiceButton.classList.add('active');
+ };
+ recognition.onresult=event=>{
+  input.value=event.results[0][0].transcript;
+  input.focus();
+ };
+ recognition.onerror=event=>{
+  addMessage('Voice সমস্যা: '+event.error,'ai');
+ };
+ recognition.onend=()=>{
+  voiceButton.textContent='🎙️ Voice';
+  voiceButton.classList.remove('active');
+ };
+ voiceButton.addEventListener('click',()=>{
+  if(voiceButton.classList.contains('active')){
+   recognition.stop();
   }else{
-   editStatus.textContent='সমস্যা: '+error.message;
+   recognition.lang=voiceLanguage.value;
+   try{recognition.start();}
+   catch(error){addMessage('Voice চালু করা যায়নি। আবার চেষ্টা করুন।','ai');}
   }
- }finally{
-  editButton.disabled=false;
+ });
+}else{
+ voiceButton.disabled=true;
+ voiceButton.title='এই ব্রাউজারে Voice Recognition সমর্থিত নয়';
+}
+
+speakToggle.addEventListener('click',()=>{
+ voiceReplyEnabled=!voiceReplyEnabled;
+ speakToggle.textContent=voiceReplyEnabled?'🔊 Voice Reply: ON':'🔊 Voice Reply: OFF';
+ if(!voiceReplyEnabled && 'speechSynthesis' in window){
+  window.speechSynthesis.cancel();
  }
 });
+
+function speakReply(text){
+ if(!voiceReplyEnabled || !('speechSynthesis' in window))return;
+ window.speechSynthesis.cancel();
+ const utterance=new SpeechSynthesisUtterance(text);
+ utterance.lang=voiceLanguage.value;
+ window.speechSynthesis.speak(utterance);
+}
 
 </script>
 </body>
@@ -238,10 +214,25 @@ def home():
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
+    selected_model = str(data.get("model", "auto")).lower()
+
+    if selected_model not in ("auto", "gemini"):
+        return jsonify({"error": "নির্বাচিত AI Model সমর্থিত নয়"}), 400
+
     message = str(data.get("message", "")).strip()
 
     if not message:
         return jsonify({"error": "বার্তা লিখুন"}), 400
+
+    search_terms = (
+        "latest", "news", "today", "current", "recent",
+        "search", "online", "internet", "web", "price",
+        "weather", "update", "breaking",
+        "সর্বশেষ", "আজকের", "আজ", "খবর", "সংবাদ",
+        "বর্তমান", "সাম্প্রতিক", "অনলাইন", "ইন্টারনেট",
+        "খুঁজে", "সার্চ", "দাম", "আবহাওয়া", "আপডেট"
+    )
+    needs_search = any(term in message.lower() for term in search_terms)
 
     api_key = os.environ.get("GEMINI_API_KEY")
 
@@ -280,12 +271,29 @@ def chat():
             json={
                 "systemInstruction": {
                     "parts": [{
-                        "text": "তুমি SK Advanced AI। তুমি একজন সহায়ক, "
-                                "বন্ধুসুলভ AI assistant। বাংলায় প্রশ্ন "
-                                "করলে বাংলায় উত্তর দেবে।"
+                        "text": (
+                            "You are SK Advanced AI, an intelligent, helpful, "
+                            "friendly and reliable multilingual AI assistant. "
+                            "Understand and respond in the user's language. "
+                            "Support Bengali, English, Arabic, Hindi, Urdu, "
+                            "Chinese, Japanese, Korean and other languages "
+                            "supported by your model. Match the user's language "
+                            "unless they request another language. "
+                            "Help with programming, debugging, mathematics, "
+                            "science, education, research, writing, translation, "
+                            "summarization, planning and general knowledge. "
+                            "Explain difficult topics clearly and step by step "
+                            "when useful. Provide accurate, practical answers. "
+                            "Never invent facts, sources, links or current news. "
+                            "Clearly say when you are uncertain or when information "
+                            "may be outdated. Be respectful, concise when appropriate, "
+                            "and ask a clarifying question when necessary. "
+                            "Your name is SK Advanced AI."
+                        )
                     }]
                 },
                 "contents": contents,
+                "tools": [{"google_search": {}}] if needs_search else [],
                 "generationConfig": {
                     "temperature": 0.7,
                     "maxOutputTokens": 2048
@@ -311,105 +319,28 @@ def chat():
             part["text"] for part in parts if "text" in part
         )
 
-        return jsonify({"reply": reply or "উত্তর পাওয়া যায়নি"})
+        grounding = candidates[0].get("groundingMetadata", {})
+        sources = []
+        seen_urls = set()
+
+        for chunk in grounding.get("groundingChunks", []):
+            web = chunk.get("web", {})
+            uri = web.get("uri", "")
+            if uri.startswith("https://") and uri not in seen_urls:
+                seen_urls.add(uri)
+                sources.append({
+                    "title": web.get("title") or "ওয়েব উৎস",
+                    "url": uri
+                })
+
+        return jsonify({
+            "reply": reply or "উত্তর পাওয়া যায়নি",
+            "sources": sources
+        })
 
     except requests.RequestException:
         return jsonify({"error": "Gemini সার্ভারের সঙ্গে সংযোগ হয়নি"}), 502
 
-
-
-@app.route("/edit-image", methods=["POST"])
-def edit_image():
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return jsonify({"error": "Gemini API Key সেট করা হয়নি"}), 503
-
-    uploaded = request.files.get("image")
-    prompt = str(request.form.get("prompt", "")).strip()
-
-    if not uploaded:
-        return jsonify({"error": "একটি ছবি নির্বাচন করুন"}), 400
-    if not prompt:
-        return jsonify({"error": "ছবি কীভাবে এডিট করতে চান লিখুন"}), 400
-    if len(prompt) > 2000:
-        return jsonify({"error": "এডিট নির্দেশনা ২০০০ অক্ষরের মধ্যে রাখুন"}), 400
-
-    mime = uploaded.mimetype
-    if mime not in ("image/jpeg", "image/png", "image/webp"):
-        return jsonify({"error": "শুধু JPG, PNG অথবা WEBP ছবি দিন"}), 400
-
-    try:
-        raw = uploaded.read()
-        if not raw:
-            return jsonify({"error": "ছবিটি খালি"}), 400
-
-        with Image.open(BytesIO(raw)) as img:
-            if img.width * img.height > 25000000:
-                return jsonify({"error": "ছবির আকার ২৫ মেগাপিক্সেলের বেশি"}), 400
-            img.verify()
-
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/"
-            "models/gemini-3.1-flash-image:generateContent"
-        )
-
-        response = post_with_retry(
-            url,
-            headers={
-                "x-goog-api-key": api_key,
-                "Content-Type": "application/json"
-            },
-            json={
-                "contents": [{
-                    "parts": [
-                        {"text": "Edit this image according to the user's "
-                                 "instructions. Preserve the main subject "
-                                 "unless asked otherwise. Instructions: " + prompt},
-                        {"inlineData": {
-                            "mimeType": mime,
-                            "data": base64.b64encode(raw).decode("utf-8")
-                        }}
-                    ]
-                }],
-                "generationConfig": {
-                    "responseModalities": ["TEXT", "IMAGE"]
-                }
-            },
-            timeout=180
-        )
-
-        result = response.json()
-        if response.status_code != 200:
-            message = result.get("error", {}).get("message", "Image API Error")
-            return jsonify({"error": message}), 502
-
-        parts = (
-            result.get("candidates", [{}])[0]
-            .get("content", {}).get("parts", [])
-        )
-
-        for part in parts:
-            data = part.get("inlineData") or part.get("inline_data")
-            if data and data.get("data"):
-                output = base64.b64decode(data["data"])
-                output_mime = data.get("mimeType") or data.get("mime_type", "image/png")
-                ext = {"image/jpeg": "jpg", "image/webp": "webp"}.get(
-                    output_mime, "png"
-                )
-                filename = str(uuid.uuid4()) + "." + ext
-                Path("static/generated").mkdir(parents=True, exist_ok=True)
-                Path("static/generated", filename).write_bytes(output)
-
-                return jsonify({
-                    "reply": "ছবি এডিট সম্পন্ন হয়েছে",
-                    "image_url": "/static/generated/" + filename
-                })
-
-        return jsonify({"error": "AI কোনো এডিট করা ছবি ফেরত দেয়নি"}), 502
-
-    except Exception:
-        app.logger.exception("Image editing failed")
-        return jsonify({"error": "ছবি এডিট করা যায়নি। ছবিটি ও নির্দেশনা পরীক্ষা করুন।"}), 500
 
 
 if __name__ == "__main__":
